@@ -1,141 +1,157 @@
 import pandas as pd
 import numpy as np
+import random
+from flask import Flask, render_template, request, jsonify, send_file
 import io
-from flask import Flask, request, render_template, send_file
 
-# --- ส่วนของ Genetic Algorithm ---
+# --- Genetic Algorithm Configuration ---
+POPULATION_SIZE = 1000  # จำนวน Chromosome ใน Pool
+SELECTION_RATE = 50     # คัด Chromosome ที่ดีที่สุด 50 อันดับ
+MUTATION_RATE = 0.1     # โอกาสที่จะเกิด Mutation
+NUM_GENERATIONS = 100   # จำนวน Generation ที่จะรัน
 
-# 1. สร้าง Chromosome αρχικό (สุ่ม Label 1 ถึง N ให้กับแต่ละงาน)
-def create_chromosome(num_tasks, n_people):
-    return np.random.randint(1, n_people + 1, size=num_tasks)
-
-# 2. คำนวณ Fitness Function (ความแปรปรวนของผลรวม Workload)
-def calculate_fitness(chromosome, workloads, n_people):
-    # สร้าง list ของผลรวม workload ของแต่ละคน (เริ่มต้นด้วย 0)
-    sums = [0] * n_people
-    for i, label in enumerate(chromosome):
-        # label ที่ได้จาก chromosome จะเป็น 1, 2, ..., N
-        # แต่ index ของ list คือ 0, 1, ..., N-1 จึงต้อง -1
-        sums[label - 1] += workloads[i]
-    
-    # ค่า fitness คือความแปรปรวน ยิ่งต่ำยิ่งดี
-    return np.var(sums)
-
-# 3. Selection: คัดเลือก Chromosome ที่ดีที่สุด (Fitness ต่ำสุด)
-def selection(population, fitness_scores, elite_size=50):
-    sorted_indices = np.argsort(fitness_scores)
-    # คัดเอา chromosome ที่ดีที่สุด (fitness ต่ำสุด) elite_size อันดับแรก
-    return [population[i] for i in sorted_indices[:elite_size]]
-
-# 4. Crossover: สร้าง Chromosome รุ่นใหม่โดยการผสมข้ามสายพันธุ์
-def crossover(parent1, parent2):
-    # เลือกจุดตัดแบบสุ่ม
-    crossover_point = np.random.randint(1, len(parent1) - 1)
-    child1 = np.concatenate((parent1[:crossover_point], parent2[crossover_point:]))
-    child2 = np.concatenate((parent2[:crossover_point], parent1[crossover_point:]))
-    return child1, child2
-
-# 5. Mutation: การกลายพันธุ์เพื่อเพิ่มความหลากหลาย
-def mutation(chromosome, n_people, mutation_rate=0.1):
-    mutated_chromosome = np.copy(chromosome)
-    for i in range(len(mutated_chromosome)):
-        if np.random.rand() < mutation_rate:
-            # Change Mutation: เปลี่ยน Label ของ Task แบบสุ่ม
-            mutated_chromosome[i] = np.random.randint(1, n_people + 1)
-        
-        if np.random.rand() < mutation_rate / 2: # ให้ Swap เกิดน้อยกว่า
-            # Swap Mutation: สลับตำแหน่ง Label ของ 2 Task
-            swap_with = np.random.randint(0, len(mutated_chromosome))
-            mutated_chromosome[i], mutated_chromosome[swap_with] = mutated_chromosome[swap_with], mutated_chromosome[i]
-            
-    return mutated_chromosome
-
-# --- ฟังก์ชันหลักในการรัน Genetic Algorithm ---
-def run_genetic_algorithm(workloads, n_people, generations=100, pool_size=1000):
-    num_tasks = len(workloads)
-
-    # 1. สร้างประชากรเริ่มต้น (Initial Population)
-    population = [create_chromosome(num_tasks, n_people) for _ in range(pool_size)]
-
-    for generation in range(generations):
-        # 2. คำนวณ Fitness ของแต่ละ Chromosome
-        fitness_scores = [calculate_fitness(chromo, workloads, n_people) for chromo in population]
-
-        # 3. คัดเลือกกลุ่ม Elite (Chromosome ที่ดีที่สุด)
-        elites = selection(population, fitness_scores, elite_size=50)
-
-        # 4. สร้างประชากรรุ่นถัดไป
-        next_generation = elites.copy() # นำกลุ่มที่ดีที่สุดไปสู่รุ่นถัดไปเลย
-
-        # เติมประชากรที่เหลือด้วย Crossover และ Mutation
-        while len(next_generation) < pool_size:
-            # สุ่มพ่อแม่จากกลุ่ม Elites
-            parent1, parent2 = elites[np.random.randint(0, len(elites))], elites[np.random.randint(0, len(elites))]
-            
-            # Crossover
-            child1, child2 = crossover(parent1, parent2)
-            
-            # Mutation
-            next_generation.append(mutation(child1, n_people))
-            if len(next_generation) < pool_size:
-                next_generation.append(mutation(child2, n_people))
-        
-        population = next_generation
-
-    # ค้นหา Chromosome ที่ดีที่สุดในรุ่นสุดท้าย
-    final_fitness_scores = [calculate_fitness(chromo, workloads, n_people) for chromo in population]
-    best_chromosome_index = np.argmin(final_fitness_scores)
-    best_chromosome = population[best_chromosome_index]
-    
-    return best_chromosome
-
-
-# --- ส่วนของ Flask Web App ---
 app = Flask(__name__)
 
-@app.route('/', methods=['GET', 'POST'])
+# --- Genetic Algorithm Functions ---
+
+def create_chromosome(num_tasks, num_groups):
+    """สร้าง Chromosome (sequence ของ label) แบบสุ่ม"""
+    return [random.randint(1, num_groups) for _ in range(num_tasks)]
+
+def calculate_fitness(chromosome, workloads, num_groups):
+    """คำนวณ Fitness function (variance) - ค่ายิ่งต่ำยิ่งดี"""
+    group_sums = [0] * num_groups
+    for i, group_label in enumerate(chromosome):
+        group_sums[group_label - 1] += workloads[i]
+    return np.var(group_sums)
+
+def selection(population_with_fitness):
+    """คัดเลือก Chromosome ที่ดีที่สุด (variance ต่ำสุด)"""
+    sorted_population = sorted(population_with_fitness, key=lambda x: x[1])
+    return [item[0] for item in sorted_population[:SELECTION_RATE]]
+
+def crossover(parent1, parent2):
+    """สร้างลูกจากการผสมข้ามของพ่อแม่"""
+    if len(parent1) != len(parent2):
+        return parent1, parent2 # Should not happen
+    point = random.randint(1, len(parent1) - 1)
+    child1 = parent1[:point] + parent2[point:]
+    child2 = parent2[:point] + parent1[point:]
+    return child1, child2
+
+def change_mutation(chromosome, num_groups):
+    """เปลี่ยน label ของ task หนึ่งแบบสุ่ม"""
+    index = random.randint(0, len(chromosome) - 1)
+    chromosome[index] = random.randint(1, num_groups)
+    return chromosome
+
+def swap_mutation(chromosome):
+    """สลับ label ระหว่าง 2 task"""
+    idx1, idx2 = random.sample(range(len(chromosome)), 2)
+    chromosome[idx1], chromosome[idx2] = chromosome[idx2], chromosome[idx1]
+    return chromosome
+    
+# --- Flask Routes ---
+
+@app.route('/')
 def index():
-    if request.method == 'POST':
-        # 1. รับข้อมูลจากฟอร์ม
-        file = request.files['file']
-        n_people = int(request.form['people'])
-
-        if not file:
-            return "กรุณาอัปโหลดไฟล์ Excel", 400
-
-        # 2. อ่านข้อมูลจาก Excel
-        df = pd.read_excel(file)
-        
-        # ตรวจสอบคอลัมน์ที่จำเป็น
-        if 'task' not in df.columns or 'workload' not in df.columns:
-            return "ไฟล์ Excel ต้องมีคอลัมน์ 'task' และ 'workload'", 400
-
-        workloads = df['workload'].tolist()
-        
-        if len(workloads) < n_people:
-            return f"จำนวนงาน ({len(workloads)}) ต้องมากกว่าหรือเท่ากับจำนวนคน ({n_people})", 400
-
-        # 3. รัน Genetic Algorithm เพื่อหาการแบ่งงานที่ดีที่สุด
-        best_assignment = run_genetic_algorithm(workloads, n_people)
-        
-        # 4. เพิ่มคอลัมน์ label ใน DataFrame
-        df['assigned_to_person'] = best_assignment
-
-        # 5. สร้างไฟล์ Excel ในหน่วยความจำเพื่อส่งกลับ
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Task_Assignment')
-        output.seek(0)
-        
-        return send_file(
-            output,
-            download_name='task_assignment_result.xlsx',
-            as_attachment=True,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-
-    # สำหรับ method GET ให้แสดงหน้าเว็บปกติ
+    """แสดงหน้าเว็บหลัก"""
     return render_template('index.html')
 
-if __name__ == '__main__':
-    app.run(debug=True)
+@app.route('/process', methods=['POST'])
+def process_file():
+    """รับไฟล์ Excel, จำนวนคน และรัน GA"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    try:
+        num_groups = int(request.form.get('num_people'))
+        if num_groups <= 0:
+            raise ValueError("Number of people must be positive")
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid number of people'}), 400
+
+    try:
+        df = pd.read_excel(file)
+        if 'task' not in df.columns or 'workload' not in df.columns:
+            return jsonify({'error': 'Excel file must have "task" and "workload" columns'}), 400
+        
+        workloads = df['workload'].tolist()
+        num_tasks = len(workloads)
+
+        if num_tasks < num_groups:
+             return jsonify({'error': 'Number of tasks cannot be less than the number of people'}), 400
+
+        # 1. Initialization - สร้างประชากรเริ่มต้น
+        population = [create_chromosome(num_tasks, num_groups) for _ in range(POPULATION_SIZE)]
+
+        # --- GA Loop ---
+        for generation in range(NUM_GENERATIONS):
+            # 2. Fitness Calculation
+            population_with_fitness = [(chromo, calculate_fitness(chromo, workloads, num_groups)) for chromo in population]
+
+            # 3. Selection
+            selected_parents = selection(population_with_fitness)
+            
+            # 4. Create Next Generation
+            next_population = selected_parents[:] # นำ elite (ที่ดีที่สุด) ไปยัง generation ถัดไปเลย
+
+            while len(next_population) < POPULATION_SIZE:
+                p1, p2 = random.sample(selected_parents, 2)
+                
+                # Crossover
+                c1, c2 = crossover(p1, p2)
+                
+                # Mutation
+                if random.random() < MUTATION_RATE:
+                    c1 = change_mutation(c1, num_groups)
+                if random.random() < MUTATION_RATE:
+                    c2 = swap_mutation(c2)
+                    
+                next_population.extend([c1, c2])
+            
+            population = next_population[:POPULATION_SIZE]
+
+        # --- สิ้นสุด GA ---
+        # หา Chromosome ที่ดีที่สุด
+        final_fitness = [(chromo, calculate_fitness(chromo, workloads, num_groups)) for chromo in population]
+        best_chromosome, best_fitness = min(final_fitness, key=lambda x: x[1])
+
+        # สร้างผลลัพธ์
+        df['label'] = best_chromosome
+        
+        # คำนวณผลรวมของแต่ละกลุ่มเพื่อแสดงผล
+        group_totals = df.groupby('label')['workload'].sum().to_dict()
+
+        # เตรียมข้อมูลสำหรับส่งกลับไปหน้าเว็บ
+        global result_df 
+        result_df = df.copy() # เก็บ dataframe ไว้สำหรับดาวน์โหลด
+        
+        return jsonify({
+            'table_html': df.to_html(classes='table table-striped', index=False),
+            'group_totals': group_totals,
+            'variance': best_fitness
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download')
+def download_file():
+    """ส่งไฟล์ผลลัพธ์ให้ User ดาวน์โหลด"""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        result_df.to_excel(writer, index=False, sheet_name='Task_Allocation')
+    
+    output.seek(0)
+    
+    return send_file(
+        output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name='task_allocation_result.xlsx'
+    )
